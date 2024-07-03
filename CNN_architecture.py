@@ -176,14 +176,14 @@ def hyper_training(data):
     for l in data.layers:
         for k in data.kernels:
             for f in data.filters:
-                
+                '''
                 # skip the execution of first three models - memory problem
                 if l==3 and k==3:
                     continue
                 
                 if l==3 and k==5 and f==32:
                     continue
-                
+                '''
                 # creating distinct name coding
                 model_name = data.case_type+'_s'+str(data.lead_steps)+'_l'+\
                              str(l)+'_k'+str(k)+'_f'+str(f)
@@ -217,11 +217,11 @@ def hyper_training(data):
                 K.clear_session()
                 gc.collect()
                 
-                # print current memory usage
+                # print current CPU memory usage
                 process = psutil.Process()
                 memory_info = process.memory_info()
                 memory_usage_mb = memory_info.rss / (1024 ** 2) # convert to MB
-                print(f"Current RAM usage: {memory_usage_mb:.2f} MB")
+                print(f"Current CPU RAM usage: {memory_usage_mb:.2f} MB")
     
     # save training for all models
     with open(data.rootdir+'Model/'+data.case_type+'_s'+str(data.lead_steps)
