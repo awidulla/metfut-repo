@@ -17,6 +17,8 @@ from tensorflow.keras.layers import *
 import tensorflow.keras.backend as K
 #import seaborn as sns
 import pickle
+import gc
+import psutil
 #from src.score import *
 from collections import OrderedDict
 
@@ -210,8 +212,16 @@ def hyper_training(data):
                 with open(data.rootdir+'Model/'+model_name+'.pickle', 'wb') as file:
                     pickle.dump(docu[str(model_name)], file)
                 
-                # clear RAM
+                # delete model and clear RAM
+                del model
                 K.clear_session()
+                gc.collect()
+                
+                # print current memory usage
+                process = psutil.Process()
+                memory_info = process.memory_info()
+                memory_usage_mb = memory_info.rss / (1024 ** 2) # convert to MB
+                print(f"Current RAM usage: {memory_usage_mb:.2f} MB")
     
     # save training for all models
     with open(data.rootdir+'Model/'+data.case_type+'_s'+str(data.lead_steps)
@@ -302,9 +312,9 @@ class data_prep:
         
         # set hyperparameters that will be iterated
         self.layers  = [3,4,5]
-        # kernels need to be uneven
+        # kernels need to be uneven - has to do with padding
         self.kernels = [3,5,7] 
-        self.filters = [32,64,128]
+        self.filters = [32,48,64]
         
         # set number of epochs per training cycle and number of cycles
         self.epochs = 5
