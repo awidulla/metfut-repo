@@ -20,7 +20,7 @@ import pickle
 import gc
 import psutil
 #from src.score import *
-from collections import OrderedDict
+#from collections import OrderedDict
 
 @keras.utils.register_keras_serializable()
 class PeriodicPadding2D(tf.keras.layers.Layer):
@@ -226,7 +226,7 @@ def hyper_training(data):
     # save training for all models
     with open(data.rootdir+'Model/'+data.case_type+'_s'+str(data.lead_steps)
               +'.pickle', 'wb') as file:
-        pickle.dump(docu[str(model_name)], file)
+        pickle.dump(docu, file)
     
 
 def main():
@@ -318,7 +318,7 @@ class data_prep:
         
         # set number of epochs per training cycle and number of cycles
         self.epochs = 5
-        self.cycles = 30
+        self.cycles = 20
         
         
     def change_time(self, begin_train, begin_valid, begin_test, end_test):
@@ -349,19 +349,62 @@ class data_prep:
         
         return sst, siconc
     
-    '''
-    write functions
-    import_atmosphere
-    import_surface
     
-    import_masks # call them sea, land, all
-    '''
+    def import_atmosphere(self):
+        '''
+        Import atmosphere fields and replace nan values with climatology
+        '''
+        # load relevant datasets
+        t850    = xr.open_mfdataset(self.rootdir+'ERA5/t850_5.625deg/*.nc',
+                                   combine='by_coords').load()
+        z500    = xr.open_mfdataset(self.rootdir+'ERA5/z500_5.625deg/*.nc',
+                                   combine='by_coords').load()
+        
+        # compute climatology
+        t850_clim    = t850.groupby('time.dayofyear').mean()
+        z500_clim    = z500.groupby('time.dayofyear').mean()
+        
+        # fill nan values using climatologies - otherwise no learning possible
+        t850   = t850.fillna(t850_clim.sel(dayofyear=t850.time.dt.dayofyear))
+        z500   = z500.fillna(z500_clim.sel(dayofyear=z500.time.dt.dayofyear))
+        
+        return t850, z500
+    
+    
+    def import_land(self):
+        '''
+        Import surface fields and replace nan values with climatology
+        '''
+        # load relevant datasets
+        t2m    = xr.open_mfdataset(self.rootdir+'ERA5/t2m_5.625deg/*.nc',
+                                   combine='by_coords').load()
+        stl    = xr.open_mfdataset(self.rootdir+'ERA5/stl1_5.625deg/*.nc',
+                                   combine='by_coords').load()
+        
+        # compute climatology
+        t2m_clim    = t2m.groupby('time.dayofyear').mean()
+        stl_clim    = stl.groupby('time.dayofyear').mean()
+        
+        # fill nan values using climatologies - otherwise no learning possible
+        t2m   = t2m.fillna(t2m_clim.sel(dayofyear=t2m.time.dt.dayofyear))
+        stl   = stl.fillna(stl_clim.sel(dayofyear=stl.time.dt.dayofyear))
+        
+        return t2m, stl
+
+    def get_masks(self):
+        lsmask = xr.open_dataset(self.rootdir+'ERA5/lsm_5.625deg.nc').load()
+        atm = xr.where(lsmask>0.5,1,1)['lsm'].values[0,:,:]
+        slm = xr.where(lsmask>0.5,0,1)['lsm'].values[0,:,:]
+        lsm = xr.where(lsmask<=0.5,0,1)['lsm'].values[0,:,:]
+        
+        return atm, slm, lsm
     # Naming
     # Output_Input 
     # O - Ocean
     # L - Land
     # A - Atmosphere
     
+    #### no coupling ####
     def O_O(self):
         '''
         Function that imports and sets up all relevant data for an ocean model
@@ -379,14 +422,342 @@ class data_prep:
         self.input_variables  = ['sst', 'siconc']
         self.output_variables = ['sst', 'siconc']
         
-        # load land sea mask and create a sea-land mask
-        lsmask = xr.open_dataset(self.rootdir+'ERA5/lsm_5.625deg.nc').load()
-        slm = xr.where(lsmask>0.5,0,1)['lsm'].values[0,:,:]
+        # import masks
+        atm, slm, lsm = self.get_masks()
         
-        self.surface_mask = K.constant(np.stack([slm, slm],axis=2))
+        #self.surface_mask = K.constant(np.stack([slm, slm],axis=2))
+        self.surface_mask = np.stack([slm, slm],axis=2)
         self.custom_loss  = CustomLoss(self.surface_mask)
     
-    # Maybe split this into function that creates input and output data
+    def A_A(self):
+        '''
+        Function that imports and sets up all relevant data for an atmosphere model
+        '''
+        # document that ocean was called
+        self.case_type = 'A_A'
+        
+        # import data
+        t850, z500 = self.import_atmosphere()
+        
+        # create datasets
+        self.get_input_dataset([t850, z500], ['t', 'z'])
+        self.get_output_dataset([t850, z500], ['t', 'z'])
+        
+        self.input_variables  = ['t850', 'z500']
+        self.output_variables = ['t850', 'z500']
+        
+        # import masks
+        atm, slm, lsm = self.get_masks()
+        
+        # self.surface_mask = K.constant(np.stack([atm, atm],axis=2))
+        self.surface_mask = np.stack([atm, atm],axis=2) # tensorflow version 2.11.0 (JSC) can't handle EagerTensor
+        self.custom_loss  = CustomLoss(self.surface_mask)
+    
+    def L_L(self):
+        '''
+        Function that imports and sets up all relevant data for an land surface model
+        '''
+        # document that ocean was called
+        self.case_type = 'L_L'
+        
+        # import data
+        t2m, stl = self.import_land()
+        
+        # create datasets
+        self.get_input_dataset([t2m, stl], ['t2m', 'stl1'])
+        self.get_output_dataset([t2m, stl], ['t2m', 'stl1'])
+        
+        self.input_variables  = ['t2m', 'stl']
+        self.output_variables = ['t2m', 'stl']
+        
+        # import masks
+        atm, slm, lsm = self.get_masks()
+        
+        #self.surface_mask = K.constant(np.stack([lsm, lsm],axis=2))
+        self.surface_mask = np.stack([lsm, lsm],axis=2)
+        self.custom_loss  = CustomLoss(self.surface_mask)
+    
+    #### fully coupled ####
+    def AOL_AOL(self):
+        '''
+        Function that imports and sets up all relevant data for an fully
+        coupled model, maps everything to everything
+        '''
+        # document that ocean was called
+        self.case_type = 'AOL_AOL'
+        
+        # import data
+        t850, z500 = self.import_atmosphere()
+        sst, siconc = self.import_ocean()
+        t2m, stl = self.import_land()
+        
+        # create datasets
+        self.get_input_dataset([t850, z500, sst, siconc, t2m, stl], ['t', 'z', 'sst', 'siconc', 't2m', 'stl1'])
+        self.get_output_dataset([t850, z500, sst, siconc, t2m, stl], ['t', 'z', 'sst', 'siconc', 't2m', 'stl1'])
+        
+        self.input_variables  = ['t850', 'z500', 'sst', 'siconc', 't2m', 'stl']
+        self.output_variables = ['t850', 'z500','sst', 'siconc', 't2m', 'stl']
+        
+        # import masks
+        atm, slm, lsm = self.get_masks()
+        
+        #self.surface_mask = K.constant(np.stack([atm, atm, slm, slm, lsm, lsm]
+        #                                        ,axis=2))
+        self.surface_mask = np.stack([atm, atm, slm, slm, lsm, lsm],axis=2)
+        self.custom_loss  = CustomLoss(self.surface_mask)
+    
+    #### coupled Atmosphere ####
+    def A_AO(self):
+        '''
+        Function that imports and sets up all relevant data for an coupled
+        model, maps ocean/atmosphere to atmosphere
+        '''
+        # document that ocean was called
+        self.case_type = 'A_AO'
+        
+        # import data
+        t850, z500 = self.import_atmosphere()
+        sst, siconc = self.import_ocean()
+        
+        # create datasets
+        self.get_input_dataset([t850, z500, sst, siconc], ['t', 'z', 'sst', 'siconc'])
+        self.get_output_dataset([t850, z500], ['t', 'z'])
+        
+        self.input_variables  = ['t850', 'z500', 'sst', 'siconc']
+        self.output_variables = ['t850', 'z500']
+        
+        '''
+        # load land sea mask and create a sea-land mask
+        lsmask = xr.open_dataset(self.rootdir+'ERA5/lsm_5.625deg.nc').load()
+        atm = xr.where(lsmask>0.5,1,1)['lsm'].values[0,:,:]
+        slm = xr.where(lsmask>0.5,0,1)['lsm'].values[0,:,:]
+        lsm = xr.where(lsmask<=0.5,0,1)['lsm'].values[0,:,:]
+        '''
+        # import masks
+        atm, slm, lsm = self.get_masks()
+        
+        #self.surface_mask = K.constant(np.stack([atm, atm]
+        #                                        ,axis=2))
+        self.surface_mask = np.stack([atm, atm], axis=2)
+        self.custom_loss  = CustomLoss(self.surface_mask)
+    
+    def A_AL(self):
+        '''
+        Function that imports and sets up all relevant data for an fully
+        coupled model, maps everything to everything
+        '''
+        # document that ocean was called
+        self.case_type = 'A_AL'
+        
+        # import data
+        t850, z500 = self.import_atmosphere()
+        t2m, stl = self.import_land()
+
+        # create datasets
+        self.get_input_dataset([t850, z500, t2m, stl], ['t', 'z', 't2m', 'stl1'])
+        self.get_output_dataset([t850, z500], ['t', 'z'])
+        
+        self.input_variables  = ['t850', 'z500', 't2m', 'stl']
+        self.output_variables = ['t850', 'z500']
+        
+        # import masks
+        atm, slm, lsm = self.get_masks()
+        
+        #self.surface_mask = K.constant(np.stack([atm, atm]
+        #                                        ,axis=2))
+        self.surface_mask = np.stack([atm, atm], axis=2)
+        self.custom_loss  = CustomLoss(self.surface_mask)
+    
+    def A_AOL(self):
+        '''
+        Function that imports and sets up all relevant data for an fully
+        coupled model, maps everything to everything
+        '''
+        # document that ocean was called
+        self.case_type = 'A_AOL'
+        
+        # import data
+        t850, z500 = self.import_atmosphere()
+        sst, siconc = self.import_ocean()
+        t2m, stl = self.import_land()
+        
+        # create datasets
+        self.get_input_dataset([t850, z500, sst, siconc, t2m, stl], ['t', 'z', 'sst', 'siconc', 't2m', 'stl1'])
+        self.get_output_dataset([t850, z500], ['t', 'z'])
+        
+        self.input_variables  = ['t850', 'z500', 'sst', 'siconc', 't2m', 'stl']
+        self.output_variables = ['t850', 'z500']
+        
+        # import masks
+        atm, slm, lsm = self.get_masks()
+        
+        #self.surface_mask = K.constant(np.stack([atm, atm]
+        #                                        ,axis=2))
+        self.surface_mask = np.stack([atm, atm], axis=2)
+        self.custom_loss  = CustomLoss(self.surface_mask)
+    
+
+    #### coupled Ocean ####
+    def O_AO(self):
+        self.case_type = 'O_AO'
+        # import data
+        t850, z500 = self.import_atmosphere()
+        sst, siconc = self.import_ocean()        
+
+        # create datasets
+        self.get_input_dataset([t850, z500, sst, siconc], ['t', 'z', 'sst', 'siconc'])
+        self.get_output_dataset([sst, siconc], ['sst', 'siconc'])
+        
+        self.input_variables  = ['t850', 'z500', 'sst', 'siconc']
+        self.output_variables = ['sst', 'siconc']
+
+        # import masks
+        atm, slm, lsm = self.get_masks()
+        
+        #self.surface_mask = K.constant(np.stack([slm, slm]
+        #                                        ,axis=2))
+        self.surface_mask = np.stack([slm, slm], axis=2)
+        self.custom_loss  = CustomLoss(self.surface_mask)
+    
+    def O_OL(self):
+        '''
+        Function that imports and sets up all relevant data for an fully
+        coupled model, maps everything to everything
+        '''
+        # document that ocean was called
+        self.case_type = 'O_OL'
+        
+        # import data
+        sst, siconc = self.import_ocean()
+        t2m, stl = self.import_land()
+        
+        # create datasets
+        self.get_input_dataset([sst, siconc, t2m, stl], ['sst', 'siconc', 't2m', 'stl1'])
+        self.get_output_dataset([sst, siconc], ['sst', 'siconc'])
+        
+        self.input_variables  = ['sst', 'siconc', 't2m', 'stl']
+        self.output_variables = ['sst', 'siconc']
+        
+        # import masks
+        atm, slm, lsm = self.get_masks()
+        
+        #self.surface_mask = K.constant(np.stack([slm, slm]
+        #                                        ,axis=2))
+        self.surface_mask = np.stack([slm, slm], axis=2)
+        self.custom_loss  = CustomLoss(self.surface_mask)
+    
+    def O_AOL(self):
+        '''
+        Function that imports and sets up all relevant data for an fully
+        coupled model, maps everything to everything
+        '''
+        # document that ocean was called
+        self.case_type = 'O_AOL'
+        
+        # import data
+        t850, z500 = self.import_atmosphere()
+        sst, siconc = self.import_ocean()
+        t2m, stl = self.import_land()
+        
+        # create datasets
+        self.get_input_dataset([t850, z500, sst, siconc, t2m, stl], ['t', 'z', 'sst', 'siconc', 't2m', 'stl1'])
+        self.get_output_dataset([sst, siconc], ['sst', 'siconc'])
+        
+        self.input_variables  = ['t850', 'z500', 'sst', 'siconc', 't2m', 'stl']
+        self.output_variables = ['sst', 'siconc']
+        
+        # import masks
+        atm, slm, lsm = self.get_masks()
+        
+        #self.surface_mask = K.constant(np.stack([slm, slm]
+        #                                        ,axis=2))
+        self.surface_mask = np.stack([slm, slm], axis=2)
+        self.custom_loss  = CustomLoss(self.surface_mask)
+    
+    #### coupled Land ####
+    def L_AL(self):
+        '''
+        Function that imports and sets up all relevant data for an fully
+        coupled model, maps everything to everything
+        '''
+        # document that ocean was called
+        self.case_type = 'L_AL'
+        
+        # import data
+        t850, z500 = self.import_atmosphere()
+        t2m, stl = self.import_land()
+        
+        # create datasets
+        self.get_input_dataset([t850, z500, t2m, stl], ['t', 'z', 't2m', 'stl1'])
+        self.get_output_dataset([t2m, stl], ['t2m', 'stl1'])
+        
+        self.input_variables  = ['t850', 'z500', 't2m', 'stl']
+        self.output_variables = ['t2m', 'stl']
+        
+        # import masks
+        atm, slm, lsm = self.get_masks()
+        
+        #self.surface_mask = K.constant(np.stack([lsm, lsm]
+        #                                        ,axis=2))
+        self.surface_mask = np.stack([lsm, lsm], axis=2)
+        self.custom_loss  = CustomLoss(self.surface_mask)
+    
+    def L_OL(self):
+        '''
+        Function that imports and sets up all relevant data for an fully
+        coupled model, maps everything to everything
+        '''
+        # document that ocean was called
+        self.case_type = 'L_OL'
+        
+        # import data
+        sst, siconc = self.import_ocean()
+        t2m, stl = self.import_land()
+        
+        # create datasets
+        self.get_input_dataset([sst, siconc, t2m, stl], ['sst', 'siconc', 't2m', 'stl1'])
+        self.get_output_dataset([t2m, stl], ['t2m', 'stl1'])
+        
+        self.input_variables  = ['sst', 'siconc', 't2m', 'stl']
+        self.output_variables = ['t2m', 'stl']
+        
+        # import masks
+        atm, slm, lsm = self.get_masks()
+        
+        #self.surface_mask = K.constant(np.stack([lsm, lsm]
+        #                                        ,axis=2))
+        self.surface_mask = np.stack([lsm, lsm], axis=2)
+        self.custom_loss  = CustomLoss(self.surface_mask)
+    
+    def L_AOL(self):
+        '''
+        Function that imports and sets up all relevant data for an fully
+        coupled model, maps everything to everything
+        '''
+        # document that ocean was called
+        self.case_type = 'L_AOL'
+        
+        # import data
+        t850, z500 = self.import_atmosphere()
+        sst, siconc = self.import_ocean()
+        t2m, stl = self.import_land()
+        
+        # create datasets
+        self.get_input_dataset([t850, z500, sst, siconc, t2m, stl], ['t', 'z', 'sst', 'siconc', 't2m', 'stl1'])
+        self.get_output_dataset([t2m, stl], ['t2m', 'stl1'])
+        
+        self.input_variables  = ['t850', 'z500', 'sst', 'siconc', 't2m', 'stl']
+        self.output_variables = ['t2m', 'stl']
+        
+        # import masks
+        atm, slm, lsm = self.get_masks()
+        
+        #self.surface_mask = K.constant(np.stack([lsm, lsm]
+        #                                        ,axis=2))
+        self.surface_mask = np.stack([lsm, lsm], axis=2)
+        self.custom_loss  = CustomLoss(self.surface_mask)
+    
+    # generate training, valid, test data
     def get_input_dataset(self, datasets, variables):
         # create lists
         X_train = []
